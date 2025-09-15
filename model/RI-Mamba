@@ -1,6 +1,6 @@
 from model.blocks.Detail_branch import *
 from model.blocks.Semantic_branch import *
-from model.blocks.R_Mamba1 import *
+from model.blocks.R_Mamba import *
 from model.blocks.G2LIM import *
 
 
@@ -14,10 +14,10 @@ class RI_Mamba(nn.Module):
         self.detail_branch = Detail_branch(self.in_dims, self.dilation)
         self.semantic_branch = Semantic_branch(self.in_dims)
 
-        self.R_Mamba1 = R_Mamba1(self.in_dims[1])
-        self.R_Mamba2 = R_Mamba1(self.in_dims[2])
-        self.R_Mamba3 = R_Mamba1(self.in_dims[3])
-        self.R_Mamba4 = R_Mamba1(self.in_dims[4])
+        self.R_Mamba1 = R_Mamba(self.in_dims[1])
+        self.R_Mamba2 = R_Mamba(self.in_dims[2])
+        self.R_Mamba3 = R_Mamba(self.in_dims[3])
+        self.R_Mamba4 = R_Mamba(self.in_dims[4])
 
         self.G2LIM = G2LIM(self.in_dims[1])
 
