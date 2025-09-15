@@ -1,0 +1,70 @@
+from model.blocks.Detail_branch import *
+from model.blocks.Semantic_branch import *
+from model.blocks.R_Mamba1 import *
+from model.blocks.G2LIM import *
+
+
+class RI_Mamba(nn.Module):
+    def __init__(self, nclass):
+        super(RI_Mamba, self).__init__()
+        self.nclass = nclass
+        self.in_dims = [32, 64, 128, 256, 512]
+        self.dilation = [4, 8, 12, 16]
+
+        self.detail_branch = Detail_branch(self.in_dims, self.dilation)
+        self.semantic_branch = Semantic_branch(self.in_dims)
+
+        self.R_Mamba1 = R_Mamba1(self.in_dims[1])
+        self.R_Mamba2 = R_Mamba1(self.in_dims[2])
+        self.R_Mamba3 = R_Mamba1(self.in_dims[3])
+        self.R_Mamba4 = R_Mamba1(self.in_dims[4])
+
+        self.G2LIM = G2LIM(self.in_dims[1])
+
+        self.conv = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(self.in_dims[1], self.in_dims[0], kernel_size=1, stride=1, padding=0),
+
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(self.in_dims[0], self.nclass, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(self.nclass),
+            nn.SiLU()
+        )
+
+    def forward(self, x):
+
+        detail = self.detail_branch(x)
+        semantic = self.semantic_branch(x)
+
+        detail_1, detail_2, detail_3, detail_4 = detail[0], detail[1], detail[2], detail[3]
+        semantic_1, semantic_2, semantic_3,semantic_4 = semantic[0], semantic[1], semantic[2], semantic[3]
+
+        R_Mamba1 = self.R_Mamba1(detail_1, semantic_1)
+        R_Mamba2 = self.R_Mamba2(detail_2, semantic_2)
+        R_Mamba3 = self.R_Mamba3(detail_3, semantic_3)
+        R_Mamba4 = self.R_Mamba4(detail_4, semantic_4)
+
+        Out = self.G2LIM(R_Mamba3, R_Mamba4)
+        Out = self.G2LIM(R_Mamba2, Out)
+        Out = self.G2LIM(R_Mamba1, Out)
+
+        Out = self.conv(Out)
+
+        outputs = []
+
+        outputs.append(Out)
+        return outputs
+
+
+if __name__ == '__main__':
+    model = RI_Mamba(2)
+    images = torch.randn(1, 3, 512, 512)
+    with torch.no_grad():
+        x = model.forward(images)
+    print(x[0].shape)
+    flops, params = profile(model, (images,))
+    print('flops: %.2f GFLOPS, params: %.2f M' % (flops / 1000000000.0, params / 1000000.0))
+
+
+
+
