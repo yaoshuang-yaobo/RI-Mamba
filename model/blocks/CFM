@@ -1,0 +1,135 @@
+
+from thop import profile
+
+import torch
+import torch.nn as nn
+
+
+class AddCoords(nn.Module):
+    def __init__(self):
+        super(AddCoords, self).__init__()
+
+    def forward(self, input_tensor):
+        """
+        :param input_tensor: shape (N, C_in, H, W)
+        :return:
+        """
+
+        batch_size_shape, channel_in_shape, dim_y, dim_x = input_tensor.shape
+        xx_ones = torch.ones([1, 1, 1, dim_x], dtype=torch.int32)
+        yy_ones = torch.ones([1, 1, 1, dim_y], dtype=torch.int32)
+
+        xx_range = torch.arange(dim_y, dtype=torch.int32)
+        yy_range = torch.arange(dim_x, dtype=torch.int32)
+        xx_range = xx_range[None, None, :, None]
+        yy_range = yy_range[None, None, :, None]
+
+        xx_channel = torch.matmul(xx_range, xx_ones)
+        yy_channel = torch.matmul(yy_range, yy_ones)
+
+        # transpose y
+        yy_channel = yy_channel.permute(0, 1, 3, 2)
+
+        xx_channel = xx_channel.float() / (dim_y - 1)
+        yy_channel = yy_channel.float() / (dim_x - 1)
+
+        xx_channel = xx_channel * 2 - 1
+        yy_channel = yy_channel * 2 - 1
+
+        xx_channel = xx_channel.repeat(batch_size_shape, 1, 1, 1).cuda()
+        yy_channel = yy_channel.repeat(batch_size_shape, 1, 1, 1).cuda()
+
+        out_x = torch.cat([input_tensor, xx_channel], dim=1).cuda()
+        out_y = torch.cat([input_tensor, yy_channel], dim=1).cuda()
+        #
+        # xx_channel = xx_channel.repeat(batch_size_shape, 1, 1, 1)
+        # yy_channel = yy_channel.repeat(batch_size_shape, 1, 1, 1)
+        #
+        # out_x = torch.cat([input_tensor, xx_channel], dim=1)
+        # out_y = torch.cat([input_tensor, yy_channel], dim=1)
+
+
+        return out_x, out_y
+
+
+class CoordAtt(nn.Module):
+    def __init__(self, inp, oup, groups=16):
+        super(CoordAtt, self).__init__()
+        self.pool_h_mean = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w_mean = nn.AdaptiveAvgPool2d((1, None))
+        self.pool_h_max = nn.AdaptiveMaxPool2d((None, 1))
+        self.pool_w_max = nn.AdaptiveMaxPool2d((1, None))
+
+        mip = max(8, inp // groups)
+
+        self.conv1_mean = nn.Sequential(
+            nn.Conv2d(inp+1, mip, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(mip),
+            nn.ReLU(inplace=True)
+        )
+
+        self.conv1_max = nn.Sequential(
+                nn.Conv2d(inp + 1, mip, kernel_size=1, stride=1, padding=0),
+                nn.BatchNorm2d(mip),
+                nn.ReLU(inplace=True)
+        )
+
+        self.conv1 = nn.Conv2d(inp+1, oup, kernel_size=1, stride=1, padding=0)
+
+        self.conv2 = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, x, y):
+        x0 = self.conv1(x)
+        y0 = self.conv1(y)
+        n, c, h, w = x.size()
+
+        # Mean pooling branch
+        x_h_mean = self.pool_h_mean(x)
+        x_w_mean = self.pool_w_mean(x).permute(0, 1, 3, 2)
+        x_mean = torch.cat([x_h_mean, x_w_mean], dim=2)
+        x_mean = self.conv1_mean(x_mean)
+        x_h_mean, x_w_mean = torch.split(x_mean, [h, w], dim=2)
+        x_w_mean = x_w_mean.permute(0, 1, 3, 2)
+
+        # Max pooling branch
+        y_h_max = self.pool_h_max(y)
+        y_w_max = self.pool_w_max(y).permute(0, 1, 3, 2)
+        y_max = torch.cat([y_h_max, y_w_max], dim=2)
+        y_max = self.conv1_max(y_max)
+        y_h_max, y_w_max = torch.split(y_max, [h, w], dim=2)
+        y_w_max = y_w_max.permute(0, 1, 3, 2)
+
+        # Apply attention
+        x = self.conv2(x_h_mean * y_w_max).sigmoid() * x0
+        y = self.conv2(y_h_max * x_w_mean).sigmoid() * y0
+
+        out = x + y
+
+        return out
+
+
+class CFM(nn.Module):
+    def __init__(self, in_dim):
+        super(CFM, self).__init__()
+        self.in_dim = in_dim
+
+        self.addcoords = AddCoords()
+        self.coord_att = CoordAtt(in_dim, self.in_dim)
+
+
+    def forward(self, x):
+        x, y = self.addcoords(x)
+        out = self.coord_att(x, y)
+        return out
+
+
+if __name__ == '__main__':
+
+    model = CFM(256)
+    model.eval()
+    images = torch.randn(1, 256, 32, 32)
+    with torch.no_grad():
+        x = model.forward(images)
+    print(x.shape)
+    flops, params = profile(model, (images,))
+    print('flops: %.2f GFLOPS, params: %.2f M' % (flops / 1000000000.0, params / 1000000.0))
